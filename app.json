@@ -16,12 +16,10 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.kayra.alisveris", 
-      "googleServicesFile": "./google-services.json"
-    },
+      "package": "com.kayra.alisveris",
+      "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false,
-      "package": "com.kayratuzun.alisverislistesi"
+      "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "single",
