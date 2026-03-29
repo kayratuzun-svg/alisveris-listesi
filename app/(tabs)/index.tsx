@@ -150,7 +150,7 @@ export default function App() {
         console.log('Bildirim izni alınamadı!');
         return;
       }
-      token = (await Notifications.getExpoPushTokenAsync({ projectId: 'your-project-id' })).data;
+      token = (await Notifications.getExpoPushTokenAsync({ projectId: '5b75d5a9-809f-4332-98be-a7df43a0683c' })).data;
     } else {
       console.log('Fiziksel bir cihaz kullanmalısınız (Web/Emülatörde Push çalışmaz).');
     }
