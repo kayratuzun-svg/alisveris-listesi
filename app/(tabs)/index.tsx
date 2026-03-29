@@ -1,7 +1,39 @@
-import { addDoc, arrayUnion, collection, deleteDoc, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
+import * as Device from 'expo-device';
+import * as Notifications from 'expo-notifications';
+import { addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, getDoc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { Alert, FlatList, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { db } from '../../firebase';
+import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { db } from '../../firebase'; // Firebase yolunu kontrol et
+
+// Bildirimlerin ekranda nasıl görüneceğini ayarlıyoruz
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// --- BİLDİRİM GÖNDERME MOTORU ---
+async function sendPushNotification(expoPushToken, title, body) {
+  const message = {
+    to: expoPushToken,
+    sound: 'default',
+    title: title,
+    body: body,
+    data: { someData: 'goes here' },
+  };
+
+  await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Accept-encoding': 'gzip, deflate',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(message),
+  });
+}
 
 // --- TEKİL LİSTE ELEMANI BİLEŞENİ ---
 const ListItem = ({ item, activeListId, userName }) => {
@@ -69,14 +101,72 @@ export default function App() {
   const [newMemberName, setNewMemberName] = useState('');
 
   const [viewMode, setViewMode] = useState('list');
-
   const [items, setItems] = useState([]);
   const [input, setInput] = useState('');
 
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
 
-  // LİSTELERİ ÇEK
+  // YENİ: Ayarlar ve Bildirim State'leri
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [expoPushToken, setExpoPushToken] = useState('');
+
+  // --- BİLDİRİM İZNİ VE KAYIT ---
+  useEffect(() => {
+    if (isLoggedIn) {
+      registerForPushNotificationsAsync().then(token => {
+        if (token) {
+          setExpoPushToken(token);
+          // Kullanıcının token'ını ve tercihini Firebase'e "Users" koleksiyonuna kaydet
+          setDoc(doc(db, 'Users', userName), {
+            token: token,
+            notificationsEnabled: notificationsEnabled
+          }, { merge: true });
+        }
+      });
+    }
+  }, [isLoggedIn, notificationsEnabled]);
+
+  async function registerForPushNotificationsAsync() {
+    let token;
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'default',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#FF231F7C',
+      });
+    }
+
+    if (Device.isDevice) {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      if (finalStatus !== 'granted') {
+        console.log('Bildirim izni alınamadı!');
+        return;
+      }
+      token = (await Notifications.getExpoPushTokenAsync({ projectId: 'your-project-id' })).data;
+    } else {
+      console.log('Fiziksel bir cihaz kullanmalısınız (Web/Emülatörde Push çalışmaz).');
+    }
+    return token;
+  }
+
+  // Ayarları değiştirdiğimizde Firebase'i de güncelle
+  const toggleSwitch = async () => {
+    const newVal = !notificationsEnabled;
+    setNotificationsEnabled(newVal);
+    if (userName) {
+      await setDoc(doc(db, 'Users', userName), { notificationsEnabled: newVal }, { merge: true });
+    }
+  };
+
+  // --- LİSTE VE ÜYE ÇEKME İŞLEMLERİ ---
   useEffect(() => {
     if (!isLoggedIn) return; 
     const q = query(collection(db, 'AllLists'), orderBy('createdAt', 'asc'));
@@ -92,14 +182,10 @@ export default function App() {
       }
     });
     return () => unsubscribe();
-  }, [isLoggedIn, userName]);
+  }, [isLoggedIn, userName, activeListId]);
 
-  // ÜRÜNLERİ ÇEK
   useEffect(() => {
-    if (!activeListId) {
-      setItems([]);
-      return;
-    }
+    if (!activeListId) { setItems([]); return; }
     const q = query(collection(db, activeListId), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -108,12 +194,8 @@ export default function App() {
     return () => unsubscribe();
   }, [activeListId]);
 
-  // SOHBET MESAJLARINI ÇEK
   useEffect(() => {
-    if (!activeListId) {
-      setMessages([]);
-      return;
-    }
+    if (!activeListId) { setMessages([]); return; }
     const q = query(collection(db, activeListId + '_chat'), orderBy('createdAt', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -121,6 +203,27 @@ export default function App() {
     });
     return () => unsubscribe();
   }, [activeListId]);
+
+  // --- GENEL FONKSİYONLAR ---
+  const activeListObj = lists.find(l => l.id === activeListId);
+
+  // Ortak bildirim gönderme fonksiyonu (Listede benden başka herkese at)
+  const notifyOtherMembers = async (title, body) => {
+    if (!activeListObj || !activeListObj.members) return;
+    
+    for (const member of activeListObj.members) {
+      if (member !== userName) {
+        const userDoc = await getDoc(doc(db, 'Users', member));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          // Eğer kullanıcının token'ı varsa ve bildirimleri açıksa gönder
+          if (userData.token && userData.notificationsEnabled) {
+            sendPushNotification(userData.token, title, body);
+          }
+        }
+      }
+    }
+  };
 
   const createNewList = async () => {
     if (!newListName.trim()) return;
@@ -135,73 +238,81 @@ export default function App() {
 
   const addMemberToList = async () => {
     if (!newMemberName.trim() || !activeListId) return;
-    const currentList = lists.find(l => l.id === activeListId);
-    if (currentList && currentList.members && currentList.members.includes(newMemberName.trim())) {
+    if (activeListObj && activeListObj.members && activeListObj.members.includes(newMemberName.trim())) {
       Alert.alert("Zaten Üye", `${newMemberName.trim()} zaten bu listede ekli.`);
       setNewMemberName('');
       return;
     }
-    await updateDoc(doc(db, 'AllLists', activeListId), {
-      members: arrayUnion(newMemberName.trim())
-    });
+    await updateDoc(doc(db, 'AllLists', activeListId), { members: arrayUnion(newMemberName.trim()) });
+    
+    // Listeye eklendiğini haber ver
+    notifyOtherMembers("Yeni Üye!", `${userName}, ${newMemberName.trim()} adlı kişiyi ${activeListObj.name} listesine ekledi.`);
     Alert.alert("Başarılı", `${newMemberName.trim()} listeye eklendi!`);
     setNewMemberName('');
+  };
+
+  const removeMember = async (memberToRemove) => {
+    if (memberToRemove === userName) {
+      Alert.alert("Hata", "Kendinizi bu şekilde silemezsiniz. Lütfen listeyi silin.");
+      return;
+    }
+    Alert.alert("Üyeyi Çıkar", `${memberToRemove} adlı kişiyi listeden çıkarmak istiyor musunuz?`, [
+      { text: "İptal", style: "cancel" },
+      { 
+        text: "Çıkar", style: "destructive", 
+        onPress: async () => {
+          await updateDoc(doc(db, 'AllLists', activeListId), { members: arrayRemove(memberToRemove) });
+        }
+      }
+    ]);
+  };
+
+  const deleteEntireList = async () => {
+    Alert.alert("Listeyi Sil", "Bu liste ve içindeki her şey silinecek. Emin misiniz?", [
+      { text: "İptal", style: "cancel" },
+      { 
+        text: "Listeyi Sil", style: "destructive", 
+        onPress: async () => {
+          await deleteDoc(doc(db, 'AllLists', activeListId));
+          setActiveListId('');
+        }
+      }
+    ]);
   };
 
   const addItem = async () => {
     if (input.trim() === '' || !activeListId) return;
     await addDoc(collection(db, activeListId), {
-      text: input,
-      completed: false,
-      createdAt: serverTimestamp(),
-      buyer: null,
-      price: null
+      text: input, completed: false, createdAt: serverTimestamp(), buyer: null, price: null
     });
+    
+    // DİĞER ÜYELERE BİLDİRİM AT
+    notifyOtherMembers("Yeni Ürün!", `${userName}, ${activeListObj.name} listesine ekledi: ${input}`);
     setInput('');
   };
 
   const sendMessage = async () => {
     if (chatInput.trim() === '' || !activeListId) return;
     await addDoc(collection(db, activeListId + '_chat'), {
-      text: chatInput,
-      sender: userName,
-      createdAt: serverTimestamp()
+      text: chatInput, sender: userName, createdAt: serverTimestamp()
     });
+    
+    // DİĞER ÜYELERE BİLDİRİM AT
+    notifyOtherMembers(`Mesaj: ${activeListObj.name}`, `${userName}: ${chatInput}`);
     setChatInput('');
   };
 
-  // YENİ: ALINANLARI TEMİZLEME FONKSİYONU (Web ve Mobil Uyumlu)
   const clearCompletedItems = async () => {
-    // Eğer bilgisayardaki web tarayıcısından giriliyorsa:
-    if (Platform.OS === 'web') {
-      const onay = window.confirm("Alınan tüm ürünler silinecek ve hesap özeti sıfırlanacaktır. Emin misiniz?");
-      if (onay) {
-        const completedItems = items.filter(i => i.completed);
-        for (let i of completedItems) {
-          await deleteDoc(doc(db, activeListId, i.id));
-        }
+    Alert.alert("Alınanları Temizle", "Alınan tüm ürünler silinecek. Emin misiniz?", [
+      { text: "İptal", style: "cancel" },
+      { 
+        text: "Temizle", style: "destructive", 
+        onPress: async () => {
+          const completedItems = items.filter(i => i.completed);
+          for (let i of completedItems) { await deleteDoc(doc(db, activeListId, i.id)); }
+        } 
       }
-    } 
-    // Eğer cep telefonundan giriliyorsa:
-    else {
-      Alert.alert(
-        "Alınanları Temizle",
-        "Alınan tüm ürünler silinecek ve hesap özeti sıfırlanacaktır. Emin misiniz?",
-        [
-          { text: "İptal", style: "cancel" },
-          { 
-            text: "Temizle", 
-            style: "destructive", 
-            onPress: async () => {
-              const completedItems = items.filter(i => i.completed);
-              for (let i of completedItems) {
-                await deleteDoc(doc(db, activeListId, i.id));
-              }
-            } 
-          }
-        ]
-      );
-    }
+    ]);
   };
 
   const calculateTotals = () => {
@@ -215,20 +326,17 @@ export default function App() {
   };
 
   const totals = calculateTotals();
-  const hasCompletedItems = items.some(item => item.completed); // Alınmış ürün var mı kontrolü
+  const hasCompletedItems = items.some(item => item.completed);
 
-  // --- MİNİ GİRİŞ EKRANI ---
+  // --- GİRİŞ EKRANI ---
   if (!isLoggedIn) {
     return (
       <View style={styles.loginScreen}>
         <Text style={styles.loginTitle}>Hoş Geldiniz 👋</Text>
         <Text style={styles.loginSub}>Listelerinize erişmek için adınızı girin</Text>
         <TextInput
-          style={styles.loginInput}
-          placeholder="Adınız Nedir? (Örn: Kayra)"
-          placeholderTextColor="#888"
-          value={userName}
-          onChangeText={setUserName}
+          style={styles.loginInput} placeholder="Adınız Nedir? (Örn: Kayra)" placeholderTextColor="#888"
+          value={userName} onChangeText={setUserName}
         />
         <TouchableOpacity style={styles.loginButton} onPress={() => userName.trim() ? setIsLoggedIn(true) : Alert.alert("Hata", "Lütfen bir isim girin.")}>
           <Text style={styles.loginButtonText}>Giriş Yap</Text>
@@ -237,17 +345,43 @@ export default function App() {
     );
   }
 
-  const activeListObj = lists.find(l => l.id === activeListId);
-
   // --- ANA EKRAN ---
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={20}>
       
+      {/* AYARLAR MODALI */}
+      <Modal visible={settingsVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.settingsModal}>
+            <Text style={styles.settingsTitle}>⚙️ Ayarlar</Text>
+            
+            <View style={styles.settingRow}>
+              <Text style={styles.settingText}>Anlık Bildirimleri Al</Text>
+              <Switch 
+                trackColor={{ false: "#767577", true: "#30d158" }}
+                thumbColor={notificationsEnabled ? "#fff" : "#f4f3f4"}
+                onValueChange={toggleSwitch} 
+                value={notificationsEnabled} 
+              />
+            </View>
+
+            <TouchableOpacity style={styles.closeSettingsButton} onPress={() => setSettingsVisible(false)}>
+              <Text style={styles.closeSettingsText}>Kapat</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <View style={styles.headerBar}>
         <Text style={styles.greetingText}>👤 {userName}</Text>
-        <TouchableOpacity onPress={() => setIsLoggedIn(false)}>
-          <Text style={styles.logoutText}>Çıkış Yap</Text>
-        </TouchableOpacity>
+        <View style={{flexDirection: 'row', alignItems: 'center'}}>
+          <TouchableOpacity onPress={() => setSettingsVisible(true)} style={styles.settingsIconBtn}>
+            <Text style={styles.settingsIconText}>⚙️ Ayarlar</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setIsLoggedIn(false)}>
+            <Text style={styles.logoutText}>Çıkış</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.createListContainer}>
@@ -261,8 +395,7 @@ export default function App() {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScroll}>
           {lists.map(list => (
             <TouchableOpacity 
-              key={list.id}
-              style={[styles.tab, activeListId === list.id && styles.activeTab]} 
+              key={list.id} style={[styles.tab, activeListId === list.id && styles.activeTab]} 
               onPress={() => { setActiveListId(list.id); setViewMode('list'); }}
             >
               <Text style={[styles.tabText, activeListId === list.id && styles.activeTabText]}>📁 {list.name}</Text>
@@ -275,13 +408,25 @@ export default function App() {
         <View style={{ flex: 1 }}>
           {activeListObj && activeListObj.members && (
             <View style={styles.membersInfoContainer}>
-              <Text style={styles.membersInfoText}>👥 <Text style={{color: '#fff', fontWeight: 'bold'}}>Üyeler:</Text> {activeListObj.members.join(', ')}</Text>
+              <Text style={styles.membersTitle}>👥 Üyeler:</Text>
+              <View style={styles.membersListWrap}>
+                {activeListObj.members.map(member => (
+                  <View key={member} style={styles.memberTag}>
+                    <Text style={styles.memberTagText}>{member}</Text>
+                    {member !== userName && (
+                      <TouchableOpacity onPress={() => removeMember(member)} style={styles.memberRemoveBtn}>
+                        <Text style={styles.memberRemoveText}>✕</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                ))}
+              </View>
             </View>
           )}
 
           <View style={styles.subTabsContainer}>
             <TouchableOpacity style={[styles.subTab, viewMode === 'list' && styles.subTabActive]} onPress={() => setViewMode('list')}>
-              <Text style={[styles.subTabText, viewMode === 'list' && styles.subTabTextActive]}>🛒 Alışveriş Listesi</Text>
+              <Text style={[styles.subTabText, viewMode === 'list' && styles.subTabTextActive]}>🛒 Liste</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.subTab, viewMode === 'chat' && styles.subTabActive]} onPress={() => setViewMode('chat')}>
               <Text style={[styles.subTabText, viewMode === 'chat' && styles.subTabTextActive]}>💬 Sohbet</Text>
@@ -290,12 +435,8 @@ export default function App() {
 
           {viewMode === 'list' ? (
             <FlatList
-              data={items}
-              renderItem={({ item }) => <ListItem item={item} activeListId={activeListId} userName={userName} />}
-              keyExtractor={item => item.id}
-              contentContainerStyle={{ paddingBottom: 40 }}
-              showsVerticalScrollIndicator={false}
-              
+              data={items} renderItem={({ item }) => <ListItem item={item} activeListId={activeListId} userName={userName} />}
+              keyExtractor={item => item.id} contentContainerStyle={{ paddingBottom: 40 }} showsVerticalScrollIndicator={false}
               ListHeaderComponent={
                 <View style={{ marginBottom: 10 }}>
                   <View style={styles.addMemberContainer}>
@@ -312,7 +453,6 @@ export default function App() {
                   </View>
                 </View>
               }
-              
               ListFooterComponent={
                 <View style={{ marginTop: 10 }}>
                   <View style={styles.summaryContainer}>
@@ -321,28 +461,25 @@ export default function App() {
                       <Text style={styles.summaryText}>Henüz harcama yapılmadı.</Text>
                     ) : (
                       Object.entries(totals).map(([person, amount]) => (
-                        <Text key={person} style={styles.summaryText}>
-                          • <Text style={{fontWeight: 'bold', color: '#fff'}}>{person}:</Text> {amount} ₺
-                        </Text>
+                        <Text key={person} style={styles.summaryText}>• <Text style={{fontWeight: 'bold', color: '#fff'}}>{person}:</Text> {amount} ₺</Text>
                       ))
                     )}
                   </View>
-                  
-                  {/* YENİ EKLENEN TEMİZLE BUTONU (Sadece alınmış ürün varsa görünür) */}
                   {hasCompletedItems && (
                     <TouchableOpacity style={styles.clearButton} onPress={clearCompletedItems}>
                       <Text style={styles.clearButtonText}>🧹 Alınanları Temizle</Text>
                     </TouchableOpacity>
                   )}
+                  <TouchableOpacity style={styles.deleteListButton} onPress={deleteEntireList}>
+                    <Text style={styles.deleteListButtonText}>🗑️ Bu Listeyi Sil</Text>
+                  </TouchableOpacity>
                 </View>
               }
             />
           ) : (
             <View style={styles.chatContainer}>
               <FlatList
-                data={messages}
-                keyExtractor={item => item.id}
-                contentContainerStyle={{ paddingVertical: 10 }}
+                data={messages} keyExtractor={item => item.id} contentContainerStyle={{ paddingVertical: 10 }}
                 renderItem={({ item }) => {
                   const isMe = item.sender === userName;
                   return (
@@ -382,7 +519,19 @@ const styles = StyleSheet.create({
   loginButtonText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   headerBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
   greetingText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  logoutText: { color: '#ff453a', fontWeight: 'bold' },
+  logoutText: { color: '#ff453a', fontWeight: 'bold', padding: 5 },
+  settingsIconBtn: { marginRight: 15, padding: 5 },
+  settingsIconText: { color: '#aaa', fontWeight: 'bold' },
+  
+  // Modal Stilleri
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' },
+  settingsModal: { width: '80%', backgroundColor: '#1E1E1E', borderRadius: 15, padding: 20, borderWidth: 1, borderColor: '#333' },
+  settingsTitle: { fontSize: 22, color: '#fff', fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
+  settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 25, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#333' },
+  settingText: { color: '#fff', fontSize: 16 },
+  closeSettingsButton: { backgroundColor: '#0a84ff', padding: 12, borderRadius: 10, alignItems: 'center' },
+  closeSettingsText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+
   createListContainer: { flexDirection: 'row', marginBottom: 15 },
   createListInput: { flex: 1, backgroundColor: '#1E1E1E', color: '#fff', padding: 10, borderRadius: 8, marginRight: 10, borderWidth: 1, borderColor: '#333' },
   createListButton: { backgroundColor: '#ff9f0a', paddingHorizontal: 15, justifyContent: 'center', borderRadius: 8 },
@@ -393,8 +542,13 @@ const styles = StyleSheet.create({
   activeTab: { backgroundColor: '#0a84ff', borderColor: '#0a84ff' },
   tabText: { color: '#888', fontWeight: 'bold' },
   activeTabText: { color: '#fff' },
-  membersInfoContainer: { marginBottom: 10, backgroundColor: '#1a1a1a', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#333' },
-  membersInfoText: { color: '#aaa', fontSize: 14 },
+  membersInfoContainer: { marginBottom: 15, backgroundColor: '#1a1a1a', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#333' },
+  membersTitle: { color: '#fff', fontWeight: 'bold', marginBottom: 8, fontSize: 14 },
+  membersListWrap: { flexDirection: 'row', flexWrap: 'wrap' },
+  memberTag: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#333', borderRadius: 15, paddingHorizontal: 10, paddingVertical: 5, marginRight: 8, marginBottom: 5 },
+  memberTagText: { color: '#ccc', fontSize: 13, marginRight: 5 },
+  memberRemoveBtn: { backgroundColor: '#ff453a', borderRadius: 10, width: 20, height: 20, justifyContent: 'center', alignItems: 'center' },
+  memberRemoveText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
   subTabsContainer: { flexDirection: 'row', marginBottom: 15, backgroundColor: '#1E1E1E', borderRadius: 8, padding: 3 },
   subTab: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
   subTabActive: { backgroundColor: '#333' },
@@ -423,11 +577,10 @@ const styles = StyleSheet.create({
   summaryContainer: { backgroundColor: '#1E1E1E', padding: 15, borderRadius: 10, borderTopWidth: 1, borderTopColor: '#333' },
   summaryTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 10 },
   summaryText: { color: '#ccc', fontSize: 16, marginBottom: 5 },
-  
-  // YENİ BUTONUN STİLİ
   clearButton: { backgroundColor: '#ff453a', padding: 15, borderRadius: 10, alignItems: 'center', marginTop: 15 },
   clearButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-
+  deleteListButton: { backgroundColor: '#2C2C2C', padding: 15, borderRadius: 10, alignItems: 'center', marginTop: 15, borderWidth: 1, borderColor: '#ff453a' },
+  deleteListButtonText: { color: '#ff453a', fontSize: 16, fontWeight: 'bold' },
   chatContainer: { flex: 1, backgroundColor: '#121212' },
   messageBubble: { maxWidth: '80%', padding: 12, borderRadius: 15, marginBottom: 10 },
   myMessage: { alignSelf: 'flex-end', backgroundColor: '#005c4b', borderBottomRightRadius: 2 },
