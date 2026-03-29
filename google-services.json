@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "434064316303",
+    "project_id": "alisveris-listesi-a5a2c",
+    "storage_bucket": "alisveris-listesi-a5a2c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:434064316303:android:06e71e31be3da92e615dfa",
+        "android_client_info": {
+          "package_name": "com.kayra.alisveris"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAtuKtehW-qckwRGi1J2d8x1BnBjxDD7H8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
